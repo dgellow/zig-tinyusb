@@ -1,11 +1,210 @@
 const std = @import("std");
+const chip = @import("imxrt1062.zig");
+const peripherals = chip.devices.MIMXRT1062.peripherals;
 
 const c = @cImport({
-    @cInclude("bsp/board_api.h");
-    // @cInclude("fsl_device_registers.h");
-    // @cInclude("bsp/imxrt/boards/teensy_41/board.h");
     @cInclude("tusb.h");
+    @cInclude("bsp/board_api.h");
 });
+
+pub extern "c" fn tusb_rhport_init(rhport: u8, init_params: ?*const c.tusb_rhport_init_t) bool;
+
+pub fn tusbInit(params: ?*const c.tusb_rhport_init_t) bool {
+    return tusb_rhport_init(0, params);
+}
+
+// LED pin definition for Teensy 4.1 (pin 13)
+const LED_PIN = 13;
+
+// Configure GPIO pin for LED
+fn configurePin() void {
+    // Configure pin mux for GPIO_B0_03 (pin 13)
+    peripherals.IOMUXC.SW_MUX_CTL_PAD_GPIO_B0_03.modify(.{
+        .MUX_MODE = .ALT5,
+    });
+
+    // Configure GPIO1 pin 3 as output (B0_03 maps to GPIO1_IO03)
+    peripherals.GPIO1.GDIR.modify(.{
+        .GDIR = peripherals.GPIO1.GDIR.read().GDIR | (1 << 3),
+    });
+}
+
+// Toggle LED
+fn toggleLed() void {
+    const current = peripherals.GPIO1.DR.read().DR;
+    peripherals.GPIO1.DR.modify(.{
+        .DR = current ^ (1 << 3),
+    });
+}
+
+fn busyWait(count: u32) void {
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        asm volatile ("" ::: "memory");
+    }
+}
+
+// Complete Teensy 4.1 USB initialization
+fn teensy41UsbInit() void {
+    // First power up and configure the PLL
+    peripherals.CCM_ANALOG.PLL_USB1.raw = 0; // Start fresh
+    // Set to enable, power and EN_USB_CLKS
+    peripherals.CCM_ANALOG.PLL_USB1.raw = 0x01000000 | 0x02000000 | 0x00000003;
+
+    // Wait longer for PLL lock - Teensy needs this
+    var timeout: u32 = 0;
+    while ((peripherals.CCM_ANALOG.PLL_USB1.raw & 0x80000000) == 0) {
+        timeout += 1;
+        if (timeout > 1000000) break; // Safety timeout
+    }
+
+    // Set the USB clock gate register
+    peripherals.CCM.CCGR6.raw = (peripherals.CCM.CCGR6.raw & ~@as(u32, 0x3)) | 0x3; // Always enable
+
+    // 2. Configure USB PHY
+    // Reset and initialize USB PHY
+    peripherals.USBPHY1.CTRL.raw = 0;
+    peripherals.USBPHY1.CTRL_SET.raw = 0x40000000; // SFTRST
+    busyWait(100000);
+    peripherals.USBPHY1.CTRL_CLR.raw = 0x40000000; // SFTRST
+    peripherals.USBPHY1.CTRL_CLR.raw = 0x80000000; // CLKGATE
+
+    // Critical: Enable transmitter
+    peripherals.USBPHY1.TX.raw = 0x10000000; // Clear all but D_CAL=1
+
+    // Power up the PHY
+    peripherals.USBPHY1.PWD.raw = 0;
+
+    // 3. Configure USB Controller
+    peripherals.USB1.USBCMD.raw = 0x00080000; // Reset controller
+    while ((peripherals.USB1.USBCMD.raw & 0x00080000) != 0) {} // Wait for reset to complete
+
+    // Set to device mode
+    peripherals.USB1.USBMODE.raw = 0x2; // Device mode
+
+    // Required setup for Teensy 4.1
+    peripherals.USB1.OTGSC.raw = 0x7F007000; // Clear all interrupt enable bits
+
+    // Setup USB controller registers
+    peripherals.USB1.USBINTR.raw = 0x140; // Enable transfer complete and USB reset interrupts
+
+    // Configure USB endpoints
+    peripherals.USB1.ENDPTFLUSH.raw = 0xFFFFFFFF; // Flush all endpoints
+    busyWait(100000);
+    peripherals.USB1.ENDPTCOMPLETE.raw = 0xFFFFFFFF; // Clear all complete flags
+
+    // 4. Start the USB controller
+    peripherals.USB1.USBCMD.raw = 0x1; // Start USB controller
+}
+
+// Initialize the hardware
+fn hardwareInit() void {
+    // Configure LED pin
+    configurePin();
+
+    // // Start-up LED indicator pattern
+    // for (0..3) |_| {
+    //     toggleLed();
+    //     busyWait(100000);
+    //     toggleLed();
+    //     busyWait(100000);
+    // }
+
+    // Initialize USB
+    teensy41UsbInit();
+
+    // Another visual indicator after USB init
+    // toggleLed();
+    // busyWait(500000);
+    // toggleLed();
+
+    // Initialize board API (clocks, etc.)
+    _ = c.board_init();
+}
+
+pub export fn main() void {
+    hardwareInit();
+
+    while (true) {
+        // Unique pattern: 2 short, 1 long
+        toggleLed();
+        busyWait(200000);
+        toggleLed();
+        busyWait(200000);
+
+        toggleLed();
+        busyWait(200000);
+        toggleLed();
+        busyWait(200000);
+
+        toggleLed();
+        busyWait(1000000);
+        toggleLed();
+
+        busyWait(2000000); // 2 second pause
+    }
+
+    // Initialize TinyUSB stack
+    const usb_init_result = tusbInit(null);
+
+    // Show initialization result through LED pattern
+    if (usb_init_result) {
+        // Success pattern - one long blink
+        toggleLed();
+        busyWait(1000000);
+        toggleLed();
+    } else {
+        // Failure pattern - five rapid blinks
+        for (0..5) |_| {
+            toggleLed();
+            busyWait(100000);
+            toggleLed();
+            busyWait(100000);
+        }
+    }
+
+    var led_timer: u32 = 0;
+
+    // Main loop
+    while (true) {
+        // TinyUSB device task
+        c.tud_task();
+
+        // Heartbeat LED
+        const current_time = c.board_millis();
+        if (current_time - led_timer > 1000) { // Slower 1 second blink
+            led_timer = current_time;
+            toggleLed();
+        }
+
+        // CDC processing
+        cdc_task();
+    }
+}
+
+fn cdc_task() void {
+    const available = c.tud_cdc_available();
+
+    if (available > 0) {
+        // Data received - different pattern
+        for (0..2) |_| {
+            toggleLed();
+            busyWait(50_000);
+            toggleLed();
+            busyWait(50_000);
+        }
+
+        // Buffer for incoming data
+        var buf: [64]u8 = undefined;
+        const count = c.tud_cdc_read(&buf, buf.len);
+
+        // Echo back the data we received
+        if (count > 0) {
+            _ = c.tud_cdc_write(&buf, count);
+            _ = c.tud_cdc_write_flush();
+        }
+    }
+}
 
 export fn tusb_time_millis_api() u32 {
     return c.board_millis();
@@ -21,7 +220,7 @@ export fn tud_descriptor_device_cb() [*]const u8 {
         0x00, // Protocol
         64, // Max packet size
         0xF1, 0x16, // VID (0x16F1 - Teensy)
-        0x03, 0x80, // PID (0x8003 - arbitrary)
+        0x72, 0x04, // PID
         0x00, 0x01, // Device version
         0x01, // Manufacturer string index
         0x02, // Product string index
@@ -195,38 +394,32 @@ export fn tud_descriptor_string_cb(index: u8, _: u16) [*]const u8 {
     }
 }
 
-pub extern "c" fn tusb_rhport_init(rhport: u8, init_params: ?*const c.tusb_rhport_init_t) bool;
+// pub export fn main() void {
+//     hardwareInit();
 
-pub fn tusbInit(params: ?*const c.tusb_rhport_init_t) bool {
-    return tusb_rhport_init(0, params);
-}
+//     // Initialize TinyUSB device
+//     _ = tusbInit(null);
 
-pub export fn main() void {
-    hardwareInit();
+//     // Main loop
+//     while (true) {
+//         // USB device task - handle USB events
+//         // c.tud_
+//         // c.tud_task();
 
-    // Initialize TinyUSB device
-    _ = tusbInit(null);
+//         // Check if we have data
+//         // if (c.tud_cdc_available() > 0) {
+//         //     // Read data
+//         //     var buf: [64]u8 = undefined;
+//         //     const count = c.tud_cdc_read(&buf, buf.len);
 
-    // Main loop
-    while (true) {
-        // USB device task - handle USB events
-        // c.tud_
-        // c.tud_task();
+//         //     // Echo back
+//         //     _ = c.tud_cdc_write(&buf, count);
+//         //     _ = c.tud_cdc_write_flush();
+//         // }
+//     }
+// }
 
-        // Check if we have data
-        // if (c.tud_cdc_available() > 0) {
-        //     // Read data
-        //     var buf: [64]u8 = undefined;
-        //     const count = c.tud_cdc_read(&buf, buf.len);
-
-        //     // Echo back
-        //     _ = c.tud_cdc_write(&buf, count);
-        //     _ = c.tud_cdc_write_flush();
-        // }
-    }
-}
-
-fn hardwareInit() void {
-    // Initialize clocks, pins, etc. for Teensy 4.1
-    // This would be your hardware-specific code
-}
+// fn hardwareInit() void {
+//     // Initialize clocks, pins, etc. for Teensy 4.1
+//     // This would be your hardware-specific code
+// }

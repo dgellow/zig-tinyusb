@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
 
     // Test program
     const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/_startup.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -29,6 +29,9 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.linkLibC();
+    exe.setLinkerScript(b.path("gnu/teensy4.1.ld"));
+    exe.entry = .{ .symbol_name = "__ivt_start" };
+
     // exe.linkSystemLibrary("c");
     // exe_mod.linkSystemLibrary("c", .{});
     // exe_mod.linkSystemLibrary("gcc", .{});
