@@ -3,6 +3,8 @@
 
 #include "tusb_option.h"
 
+#define CPU_MIMXRT1062DVJ6B 1
+
 #define CFG_TUSB_MCU OPT_MCU_MIMXRT10XX
 #define CFG_TUSB_OS OPT_OS_NONE
 #define CFG_TUD_ENABLED 1

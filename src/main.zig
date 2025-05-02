@@ -1,11 +1,15 @@
 const std = @import("std");
 
 const c = @cImport({
-    // @cInclude("bsp/board_api.h");
-    @cInclude("fsl_device_registers.h");
+    @cInclude("bsp/board_api.h");
+    // @cInclude("fsl_device_registers.h");
     // @cInclude("bsp/imxrt/boards/teensy_41/board.h");
     @cInclude("tusb.h");
 });
+
+export fn tusb_time_millis_api() u32 {
+    return c.board_millis();
+}
 
 export fn tud_descriptor_device_cb() [*]const u8 {
     const desc_device = [_]u8{
